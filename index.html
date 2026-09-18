@@ -1141,8 +1141,19 @@ const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 // accounts is created and assigned a role.
 // =====================================================================
 const USERNAME_EMAIL_DOMAIN = "wri-dashboard.bt"; // change if you prefer
+
+// Exceptions: if you created someone's Supabase Auth account using a real
+// email instead of the generated username@wri-dashboard.bt pattern, add
+// them here (exact username → the real email you used). Everyone NOT
+// listed here still uses the generated pattern automatically.
+const USERNAME_EMAIL_OVERRIDES = {
+  "Sonam_Dorji": "sdorji1@moenr.gov.bt"
+};
+
 function usernameToEmail(username) {
-  return username.trim().toLowerCase().replace(/\s+/g, "_") + "@" + USERNAME_EMAIL_DOMAIN;
+  const key = username.trim();
+  if (USERNAME_EMAIL_OVERRIDES[key]) return USERNAME_EMAIL_OVERRIDES[key];
+  return key.toLowerCase().replace(/\s+/g, "_") + "@" + USERNAME_EMAIL_DOMAIN;
 }
 
 let CURRENT_PERMISSION = null; // 'admin' | 'staff' | null (visitor)
@@ -1164,7 +1175,11 @@ function doLogin() {
   supabaseClient.auth.signInWithPassword({ email: usernameToEmail(u), password: p })
     .then(({ error }) => {
       if (error) {
-        document.getElementById("loginErr").textContent = "Invalid username or password.";
+        console.error('Login error:', error.message, error);
+        // Show the real reason (e.g. "Email not confirmed") instead of a
+        // generic message, so a wrong-password vs. unconfirmed-account
+        // vs. project-mismatch problem can actually be told apart.
+        document.getElementById("loginErr").textContent = error.message || "Invalid username or password.";
         document.getElementById('loginPass').value = '';
       } else {
         closeLoginScreen();
