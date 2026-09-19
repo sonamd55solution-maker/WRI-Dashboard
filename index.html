@@ -1123,6 +1123,27 @@ const SUPABASE_URL = "https://ndipikjvmvmnszrbxvhj.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5kaXBpa2p2bXZtbnN6cmJ4dnhqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk3NTIyNDMsImV4cCI6MjEwNTMyODI0M30.JM35-1toYLflXixFAWbyYp3fiLjMBQ_vKOrJu1IoVG0";
 const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// Some preview/sandbox environments forward console output to a parent
+// frame via postMessage, which throws "DataCloneError" if any logged
+// argument contains something the structured clone algorithm can't
+// copy — e.g. a Headers instance carried on a failed-fetch error from
+// Supabase. Passing every caught error through this first strips it
+// down to plain, always-cloneable string/number fields (and avoids the
+// unhelpful "[object Object]" you get from logging a plain object
+// directly) before it ever reaches console.error().
+function safeErr(e) {
+  if (e == null || typeof e === 'string') return e;
+  const out = {};
+  if (e.message) out.message = String(e.message);
+  if (e.name) out.name = String(e.name);
+  if (e.status != null) out.status = e.status;
+  if (e.code != null) out.code = String(e.code);
+  if (e.error_description) out.error_description = String(e.error_description);
+  if (e.stack) out.stack = String(e.stack);
+  if (Object.keys(out).length) return out;
+  try { return JSON.parse(JSON.stringify(e)); } catch { return String(e); }
+}
+
 // =====================================================================
 // AUTH — Supabase Authentication (replaces the old hardcoded USERS dict)
 // =====================================================================
@@ -1175,7 +1196,7 @@ function doLogin() {
   supabaseClient.auth.signInWithPassword({ email: usernameToEmail(u), password: p })
     .then(({ error }) => {
       if (error) {
-        console.error('Login error:', error.message, error);
+        console.error('Login error:', safeErr(error));
         // Show the real reason (e.g. "Email not confirmed") instead of a
         // generic message, so a wrong-password vs. unconfirmed-account
         // vs. project-mismatch problem can actually be told apart.
@@ -1208,7 +1229,7 @@ async function handleAuthChange(session) {
         fullName = profile.full_name || fullName;
         title = profile.title || title;
       }
-    } catch (e) { console.error('Could not load profile:', e?.message || JSON.stringify(e)); }
+    } catch (e) { console.error('Could not load profile:', safeErr(e)); }
 
     CURRENT_PERMISSION = permission;
     CURRENT_NAME = fullName;
@@ -3071,7 +3092,7 @@ document.getElementById('fileInput').addEventListener('change', function(e) {
         } catch(err) {
           hideLoading();
           alert('Error processing CSV data: ' + err.message);
-          console.error(err);
+          console.error(safeErr(err));
         }
       },
       error: function(err) { hideLoading(); alert('CSV parse error: ' + (err.message || 'Check file format.')); }
@@ -3106,7 +3127,7 @@ document.getElementById('fileInput').addEventListener('change', function(e) {
         } catch(innerErr) {
           hideLoading();
           alert('Error processing Excel data: ' + innerErr.message);
-          console.error(innerErr);
+          console.error(safeErr(innerErr));
           return;
         }
       } catch(err) {
@@ -7307,7 +7328,7 @@ window.addEventListener('DOMContentLoaded', () => {
     FILTERED_DATA = [...RAW_DATA];
     initDashboard();
   } catch(e) {
-    console.error('Dashboard init error:', e);
+    console.error('Dashboard init error:', safeErr(e));
   }
   setTimeout(hideLoading, 1200);
 });
@@ -7405,7 +7426,7 @@ async function dsApplySelection() {
     initDashboard();
     renderYearComparison(years);
   } catch (e) {
-    console.error(e);
+    console.error(safeErr(e));
     alert('Could not load dataset: ' + e.message);
   }
   hideLoading();
@@ -7519,7 +7540,7 @@ async function confirmPendingUpload() {
     await refreshDatasetList();
     setTimeout(() => { document.getElementById('uploadYearModal').style.display = 'none'; }, 900);
   } catch (e) {
-    console.error(e);
+    console.error(safeErr(e));
     status.textContent = 'Error: ' + e.message;
   }
 }
@@ -7534,11 +7555,15 @@ async function refreshDatasetList() {
     if (error) throw error;
     DS_META = data || [];
   } catch (e) {
-    // Supabase errors are plain objects, not JS Error instances — logging
-    // them directly (or string-concatenating them) prints "[object Object]".
-    // Pull out the actual fields so the real problem is visible.
-    const msg = e?.message || e?.error_description || JSON.stringify(e);
-    console.error('Could not load dataset list:', msg, e);
+    // Supabase errors are plain objects, not JS Error instances, and can
+    // carry a non-cloneable Headers object from the underlying failed
+    // fetch — logging them raw (or string-concatenating them) either
+    // prints "[object Object]" or, in a sandboxed preview that forwards
+    // console output via postMessage, throws its own DataCloneError on
+    // top of the real problem. safeErr() strips it to plain fields first.
+    const safe = safeErr(e);
+    const msg = (safe && safe.message) || (safe && safe.error_description) || JSON.stringify(safe);
+    console.error('Could not load dataset list:', msg, safe);
     const tr = document.getElementById('ms-trigger-dataset');
     if (tr) tr.textContent = 'Error loading datasets — see console';
     DS_META = [];
@@ -7933,12 +7958,12 @@ async function generateDataRequestPDF() {
       org_category: F.orgCategory, phone: F.phone, email: F.email, dataset_rows: F.datasetRows,
       area_of_interest: F.areaOfInterest, preferred_format: F.preferredFormat, preferred_delivery: F.preferredDelivery,
       signing_method: F.signingMethod, terms_accepted: F.termsAccepted, status: 'generated'
-    }).then(({ error }) => { if (error) console.error('Could not log data request:', error); });
+    }).then(({ error }) => { if (error) console.error('Could not log data request:', safeErr(error)); });
 
     document.getElementById('dr_resultMethod').textContent = F.signingMethod === 'e-sign' ? 'E-Sign & Print' : 'Print & Sign';
     drGoToStep('result');
   } catch (e) {
-    console.error(e);
+    console.error(safeErr(e));
     alert('Could not generate the PDF: ' + e.message);
   }
 }
