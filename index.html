@@ -1109,6 +1109,7 @@ canvas {
     <div class="login-divider"></div>
     <button type="button" onclick="closeLoginScreen()" style="background:none;border:none;color:var(--text-dim);font-size:11px;letter-spacing:1px;cursor:pointer;margin-top:4px;">CONTINUE AS VISITOR</button>
     <div class="login-footer">DEPARTMENT OF WATER · ROYAL GOVERNMENT OF BHUTAN</div>
+    <div id="buildStamp" style="text-align:center;font-size:9px;letter-spacing:1px;opacity:.55;margin-top:6px;font-family:monospace;"></div>
   </div>
 </div>
 
@@ -1119,6 +1120,14 @@ canvas {
 // This is meant to be public in frontend code; real protection comes
 // from the Row Level Security policies in sql/schema.sql.
 // =====================================================================
+// Build stamp — shown at the bottom of the login card and in the console, so you can
+// tell at a glance which version of this file GitHub Pages is actually serving.
+const WRI_BUILD = "2026-09-19 · supabase-url-fix";
+console.info("WRI Dashboard build:", WRI_BUILD);
+window.addEventListener("DOMContentLoaded", () => {
+  const el = document.getElementById("buildStamp");
+  if (el) el.textContent = "BUILD " + WRI_BUILD.toUpperCase() + " · " + new URL(SUPABASE_URL).hostname.split(".")[0];
+});
 const SUPABASE_URL = "https://ndipikjvmvmnszrbxvxj.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5kaXBpa2p2bXZtbnN6cmJ4dnhqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk3NTIyNDMsImV4cCI6MjEwNTMyODI0M30.JM35-1toYLflXixFAWbyYp3fiLjMBQ_vKOrJu1IoVG0";
 // Sanity check: the project ref inside the anon key must match the URL's host.
@@ -1436,6 +1445,9 @@ supabaseClient.auth.getSession().then(({ data: { session } }) => handleAuthChang
 
   <!-- MAIN CONTENT -->
   <div id="main">
+
+    <!-- Shown when the selected dataset(s) do not record some fields (e.g. the 2021 inventory has no water-quality data) -->
+    <div id="datasetCoverageNote" style="display:none;margin:0 0 14px;padding:10px 14px;background:#fff8e1;border:1px solid #f0d78a;border-left:4px solid #e0a800;border-radius:8px;color:#5c4a00;font-size:12.5px;line-height:1.6;"></div>
 
     <!-- ═══════════════════════════════════════════════════════════
          SECTION 1: EXECUTIVE SUMMARY
@@ -2858,6 +2870,168 @@ function normaliseRow(row) {
 }
 
 // =====================================================================
+// DATASET SCHEMA ADAPTER — makes a file from ANY survey year analysable
+// ---------------------------------------------------------------------
+// Different years use different column names. The 2021 inventory, for
+// example, has "Water Source Name", "Latitude (DD)", "Elevation (m)",
+// "Water status", "Watershed condition", "No. of H/H" and
+// "Discharge (l/s) [Spring 2021]". Every chart reads columns through
+// HEADERS, so this adapter maps a file's own headers onto HEADERS *by
+// meaning*, tidies the values, and leaves anything the file does not
+// record empty (charts then show "No data" instead of failing).
+//
+//   • runs on upload AND when a saved dataset is selected, so datasets
+//     uploaded earlier in their original format work too;
+//   • idempotent — running it again, or on already-standard data, is safe;
+//   • to teach it a new header variant, add it to SCHEMA_ALIASES below
+//     (lower-case; text in [brackets] is ignored when matching).
+// =====================================================================
+const SCHEMA_ALIASES = {
+  sourceId:   ['source id', 'sl/no', 'sl no', 'sl. no', 'sl.no', 's/n', 'serial no', 'serial number'],
+  name:       ['name of the water source', 'water source name', 'name of water source', 'source name', 'spring name', 'name of source'],
+  village:    ['village', 'chewog/village', 'chiwog/village', 'village/chewog', 'village/chiwog', 'chewog / village', 'chiwog / village'],
+  chiwog:     ['chiwog', 'chewog'],
+  gewog:      ['gewog', 'geog'],
+  dzongkhag:  ['dzongkhag', 'district'],
+  lat:        ['latitude', 'latitude (dd)', 'latitude dd', 'lat'],
+  lon:        ['longitude', 'longitude (dd)', 'longitude dd', 'long', 'lon'],
+  altitude:   ['altitude', 'elevation', 'elevation (m)', 'altitude (m)', 'elevation (masl)', 'altitude (masl)'],
+  seasonal:   ['seasonality?', 'seasonality', 'seasonal'],
+  sourceType: ['type of water source', 'source type', 'type of source', 'water source type'],
+  status:     ['source status', 'water status', 'status of source', 'status of water source', 'status'],
+  dryReason:  ['reasons for drying of sources', 'reasons for drying'],
+  discharge:  ['discharge (l/s)', 'discharge', 'discharge (lps)', 'discharge in l/s'],
+  ec:         ['ec', 'ec (us/cm)', 'electrical conductivity', 'electrical conductivity (us/cm)'],
+  ph:         ['ph'],
+  salinity:   ['salinity', 'salinity (ppt)'],
+  temp:       ['temperature', 'temp', 'water temperature', 'temperature (degree celcius)', 'temperature (°c)'],
+  tds:        ['tds', 'tds (mg/l)', 'total dissolved solids'],
+  watershed:  ['micro-watershed classification', 'watershed condition', 'watershed classification', 'micro watershed classification', 'micro-watershed condition'],
+  forest:     ['major forest type', 'forest type'],
+  use:        ['water source uses', 'water source use', 'water use'],
+  hhs:        ['household', 'households', 'no. of h/h', 'no of h/h', 'no. of hh', 'no of hh', 'no. of households', 'number of households', 'h/h', 'hh'],
+  population: ['population', 'population served', 'no. of beneficiaries', 'beneficiaries'],
+  infraType:  ['type of water infrastructure?', 'type of water infrastructure'],
+};
+
+// Official Dzongkhag spellings used by the dashboard (matches the boundary layers).
+const DZONGKHAG_CANON = ['Bumthang', 'Chhukha', 'Dagana', 'Gasa', 'Haa', 'Lhuentse', 'Monggar', 'Paro', 'Pema Gatshel', 'Punakha',
+  'Samdrup Jongkhar', 'Samtse', 'Sarpang', 'Thimphu', 'Trashi Yangtse', 'Trashigang', 'Trongsa', 'Tsirang', 'Wangdue Phodrang', 'Zhemgang'];
+const DZONGKHAG_LOOKUP = (() => {
+  const m = {};
+  DZONGKHAG_CANON.forEach(n => { m[n.toLowerCase().replace(/[^a-z]/g, '')] = n; });
+  Object.entries({
+    chukha: 'Chhukha', mongar: 'Monggar', pemagatshel: 'Pema Gatshel', pemagatsel: 'Pema Gatshel', trashiyangtse: 'Trashi Yangtse',
+    trashiyangste: 'Trashi Yangtse', yangtse: 'Trashi Yangtse', wangduephodrang: 'Wangdue Phodrang', wangdue: 'Wangdue Phodrang',
+    wangdi: 'Wangdue Phodrang', lhuntse: 'Lhuentse', tashigang: 'Trashigang', shemgang: 'Zhemgang', samchi: 'Samtse',
+    samdrupjonkhar: 'Samdrup Jongkhar', sjongkhar: 'Samdrup Jongkhar', gasa: 'Gasa', punakha: 'Punakha'
+  }).forEach(([k, v]) => { m[k] = v; });
+  return m;
+})();
+function canonDzongkhag(v) {
+  const t = String(v == null ? '' : v).trim();
+  return DZONGKHAG_LOOKUP[t.toLowerCase().replace(/[^a-z]/g, '')] || t;
+}
+
+function schemaNormHeader(h) {
+  return String(h).toLowerCase().replace(/\[[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+// "17", "?17", "1,200" → number text; "School", "" → ''
+function schemaCleanNumber(v) {
+  if (v == null) return '';
+  const t = String(v).trim();
+  if (t === '') return '';
+  if (/^-?\d+(\.\d+)?$/.test(t)) return t;
+  const m = t.replace(/,/g, '').match(/-?\d+(\.\d+)?/);
+  return m ? m[0] : '';
+}
+function guessYearFromFileName(name) {
+  const m = /(?:19|20)\d{2}/.exec(String(name || ''));
+  return m ? m[0] : '';
+}
+
+// Returns a NEW array of tidy rows; also leaves a summary in window.LAST_ADAPT_REPORT.
+function adaptDatasetRows(rows, opts) {
+  opts = opts || {};
+  if (!Array.isArray(rows) || !rows.length) return rows || [];
+  const year = opts.year == null ? '' : String(opts.year).trim();
+
+  // 1) work out which of the file's columns mean what
+  const cols = new Set();
+  rows.forEach(r => Object.keys(r).forEach(k => cols.add(k)));
+  const byNorm = {};
+  cols.forEach(c => { const n = schemaNormHeader(c); if (!(n in byNorm)) byNorm[n] = c; });
+  const colMap = {};                      // standard column name -> the file's own column name
+  Object.keys(HEADERS).forEach(key => {
+    const std = HEADERS[key];
+    if (cols.has(std)) return;            // already in the standard layout
+    for (const alias of (SCHEMA_ALIASES[key] || [])) {
+      if (byNorm[alias] !== undefined) { colMap[std] = byNorm[alias]; return; }
+    }
+  });
+
+  // 2) tidy every row
+  const report = { rowsIn: rows.length, rowsOut: 0, blankRowsDropped: 0, mapped: colMap, invalid: {} };
+  const bad = key => { report.invalid[key] = (report.invalid[key] || 0) + 1; };
+  const out = [];
+  rows.forEach(r => {
+    const o = {};
+    Object.keys(r).forEach(k => { const v = r[k]; o[k] = (typeof v === 'string') ? v.trim() : (v == null ? '' : v); });
+    Object.keys(colMap).forEach(std => {
+      if (o[std] === undefined || o[std] === '') o[std] = o[colMap[std]] === undefined ? '' : o[colMap[std]];
+    });
+
+    // completely empty spreadsheet rows (e.g. a row of commas)
+    if (!o[HEADERS.name] && !o[HEADERS.lat] && !o[HEADERS.lon] && !o[HEADERS.dzongkhag] && !o[HEADERS.gewog]) { report.blankRowsDropped++; return; }
+
+    // serial numbers used as Source ID → prefix with the dataset year so IDs stay unique across years
+    if (colMap[HEADERS.sourceId] && o[HEADERS.sourceId] !== '' && year) o[HEADERS.sourceId] = year + '-' + o[HEADERS.sourceId];
+
+    // numbers stored as text with stray characters
+    [HEADERS.lat, HEADERS.lon, HEADERS.altitude, HEADERS.discharge, HEADERS.hhs, HEADERS.population].forEach(c => {
+      if (o[c] !== undefined) o[c] = schemaCleanNumber(o[c]);
+    });
+    // values that cannot be right are blanked (and counted) rather than distorting the charts
+    const lat = parseFloat(o[HEADERS.lat]), lon = parseFloat(o[HEADERS.lon]), alt = parseFloat(o[HEADERS.altitude]), q = parseFloat(o[HEADERS.discharge]);
+    if (!isNaN(lat) && (lat < 26.5 || lat > 28.5)) { o[HEADERS.lat] = ''; bad('latitude outside Bhutan'); }
+    if (!isNaN(lon) && (lon < 88.5 || lon > 92.5)) { o[HEADERS.lon] = ''; bad('longitude outside Bhutan'); }
+    if (!isNaN(alt) && (alt < 0 || alt > 7600)) { o[HEADERS.altitude] = ''; bad('altitude not possible for Bhutan'); }
+    if (!isNaN(q) && q < 0) { o[HEADERS.discharge] = ''; bad('negative discharge'); }
+
+    if (o[HEADERS.dzongkhag]) o[HEADERS.dzongkhag] = canonDzongkhag(o[HEADERS.dzongkhag]);
+    out.push(o);
+  });
+  report.rowsOut = out.length;
+  window.LAST_ADAPT_REPORT = report;
+  if (Object.keys(colMap).length || report.blankRowsDropped || Object.keys(report.invalid).length) console.info('Dataset adapted:', report);
+  return out;
+}
+
+// Which groups of fields does the loaded data not record at all? (drives the notice at the top of the page)
+const COVERAGE_GROUPS = [
+  { label: 'water quality (pH, EC, TDS, temperature)', keys: ['ph', 'ec', 'tds', 'temp', 'salinity'] },
+  { label: 'source type', keys: ['sourceType'] },
+  { label: 'seasonality', keys: ['seasonal'] },
+  { label: 'water use', keys: ['use'] },
+  { label: 'population served', keys: ['population'] },
+  { label: 'water infrastructure', keys: ['infraType'] },
+  { label: 'reasons for drying', keys: ['dryReason'] },
+  { label: 'forest type', keys: ['forest'] },
+  { label: 'aquatic biodiversity', keys: ['biodiversity'] },
+  { label: 'turbidity', keys: ['turbid'] },
+];
+function renderDatasetCoverage() {
+  const el = document.getElementById('datasetCoverageNote');
+  if (!el) return;
+  if (!RAW_DATA.length) { el.style.display = 'none'; return; }
+  const has = key => RAW_DATA.some(r => { const v = r[HEADERS[key]]; return v !== undefined && v !== null && String(v).trim() !== ''; });
+  const missing = COVERAGE_GROUPS.filter(g => !g.keys.some(has)).map(g => g.label);
+  if (!missing.length) { el.style.display = 'none'; return; }
+  el.innerHTML = `ℹ️ <b>This dataset does not record:</b> ${missing.join(', ')}. Charts and indicators built on these fields will show “No data”, “Unknown” or zero — that is expected, not an error. Everything else (status, discharge, location, households, watershed condition…) is analysed normally.`;
+  el.style.display = 'block';
+}
+
+// =====================================================================
 // SAMPLE DATA — Fallback When No File Is Uploaded
 // Generates 120 realistic-looking fake water source records using real
 // Bhutan Dzongkhag and Gewog names. Shown on first load so the dashboard
@@ -3014,6 +3188,10 @@ function computeWQI(row) {
   const tds = parseFloat(row[HEADERS.tds]);
   const turbid = row[HEADERS.turbid];
 
+  // A dataset with no pH / EC / TDS at all (e.g. the 2021 inventory) has no quality score —
+  // returning null keeps every source from being marked down for data that was never collected.
+  if (isNaN(ph) && isNaN(ec) && isNaN(tds)) return null;
+
   let score = 100;
   // pH scoring (ideal 6.5–8.5)
   if (!isNaN(ph)) {
@@ -3089,9 +3267,10 @@ function enrichData(data) {
 // Returns: "safe" | "moderate" | "high" | "critical"
 // Edit thresholds here to change when a source is flagged as critical.
 function getRiskLevel(wqi, stress) {
-  if (wqi < 30 || stress >= 70) return 'critical';
-  if (wqi < 50 || stress >= 50) return 'high';
-  if (wqi < 70 || stress >= 30) return 'moderate';
+  const hasWqi = wqi !== null && wqi !== undefined && !isNaN(wqi);   // no quality data → judge on stress alone
+  if ((hasWqi && wqi < 30) || stress >= 70) return 'critical';
+  if ((hasWqi && wqi < 50) || stress >= 50) return 'high';
+  if ((hasWqi && wqi < 70) || stress >= 30) return 'moderate';
   return 'safe';
 }
 
@@ -3142,12 +3321,19 @@ document.getElementById('fileInput').addEventListener('change', function(e) {
 
   if (ext === 'csv') {
     showLoading('PARSING CSV DATA...');
-    Papa.parse(file, {
+    // Read as text ourselves: UTF-8 first, Windows-1252 if the file was saved by Excel with accented characters
+    file.arrayBuffer().then(buf => {
+      let text;
+      try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+      catch (e) { text = new TextDecoder('windows-1252').decode(buf); }
+      return text;
+    }).then(text => Papa.parse(text, {
       header: true,
-      skipEmptyLines: true,
+      skipEmptyLines: 'greedy',
       complete: function(results) {
-        // Trim whitespace from all keys and string values (new headers have extra spaces)
-        const cleaned = results.data.map(row => {
+        // Trim whitespace from all keys and string values (new headers have extra spaces),
+        // then map this file's own column names onto the dashboard's (see adaptDatasetRows)
+        const cleaned = adaptDatasetRows(results.data.map(row => {
           const cleanRow = {};
           Object.keys(row).forEach(k => {
             const cleanKey = String(k).trim().replace(/\s+/g, ' ');
@@ -3155,7 +3341,7 @@ document.getElementById('fileInput').addEventListener('change', function(e) {
             cleanRow[cleanKey] = (typeof val === 'string') ? val.trim() : (val === null || val === undefined ? '' : String(val));
           });
           return normaliseRow(cleanRow);
-        });
+        }), { year: guessYearFromFileName(file.name) });
         try {
           RAW_DATA = enrichData(cleaned);
           FILTERED_DATA = [...RAW_DATA];
@@ -3169,7 +3355,7 @@ document.getElementById('fileInput').addEventListener('change', function(e) {
         }
       },
       error: function(err) { hideLoading(); alert('CSV parse error: ' + (err.message || 'Check file format.')); }
-    });
+    })).catch(err => { hideLoading(); alert('Could not read the CSV file: ' + ((err && err.message) || err)); console.error(safeErr(err)); });
   } else if (ext === 'xlsx' || ext === 'xls') {
     showLoading('PARSING EXCEL DATA...');
     const reader = new FileReader();
@@ -3181,7 +3367,7 @@ document.getElementById('fileInput').addEventListener('change', function(e) {
         // raw:false converts everything to formatted strings, defval:'' fills empty cells
         const jsonData = XLSX.utils.sheet_to_json(firstSheet, { raw: false, defval: '' });
         // Trim whitespace from all keys and string values
-        const cleaned = jsonData.map(row => {
+        const cleaned = adaptDatasetRows(jsonData.map(row => {
           const cleanRow = {};
           Object.keys(row).forEach(k => {
             const cleanKey = String(k).trim().replace(/\s+/g, ' ');
@@ -3189,7 +3375,7 @@ document.getElementById('fileInput').addEventListener('change', function(e) {
             cleanRow[cleanKey] = (typeof val === 'string') ? val.trim() : (val === null || val === undefined ? '' : String(val));
           });
           return normaliseRow(cleanRow);
-        });
+        }), { year: guessYearFromFileName(file.name) });
         if (!cleaned.length) { hideLoading(); alert('No data rows found in Excel file. Check the file has a header row and data.'); return; }
         try {
           RAW_DATA = enrichData(cleaned);
@@ -3235,6 +3421,7 @@ function initDashboard() {
 }
 
 function updateAll() {
+  try { renderDatasetCoverage(); } catch (e) { console.error('Coverage notice failed:', safeErr(e)); }
   updateRecordCount();
   renderKPIs();
   renderQualityKPIs();
@@ -3643,7 +3830,7 @@ function renderStressKPIs() {
     { label:'Critical Vulnerability', value: critical, sub:'Index ≥ 70 (urgent action)', cls:'crit' },
     { label:'High Vulnerability', value: high, sub:'Index 50-70 (monitoring needed)', cls:'risk' },
     { label:'Avg Reliability', value: avgRel + '%', sub:'Source reliability score', cls:'teal' },
-    { label:'Dry + Seasonal', value: d.filter(r=>r[HEADERS.status]==='Dry'||r[HEADERS.seasonal]==='Seasonal').length, sub:'Low reliability sources', cls:'warn' },
+    { label:'Dry + Seasonal', value: d.filter(r=>['dry','dried','dried up'].includes((r[HEADERS.status]||'').toLowerCase())||r[HEADERS.seasonal]==='Seasonal').length, sub:'Low reliability sources', cls:'warn' },
     { label:'Safe Sources', value: d.filter(r=>r._risk==='safe').length, sub:'Low risk & stress', cls:'safe' },
   ];
   const grid = document.getElementById('stressKpi');
@@ -3976,8 +4163,17 @@ function renderParamComplianceChart() {
   const turbOk = d.filter(r=>(r[HEADERS.turbid]||'').toLowerCase()!=='yes').length;
   const total = d.length;
   const labels = ['pH (6.5–8.5)','EC (≤400)','TDS (≤300)','Temp (5–25°C)','Not Turbid'];
+  // (labels get a "— not recorded" suffix below when the dataset has no values for that parameter)
   const compliant = [phOk,ecOk,tdsOk,tempOk,turbOk];
   const nonCompliant = compliant.map(v=>total-v);
+  // A parameter this dataset never recorded (e.g. no pH/EC/TDS in the 2021 inventory) is shown as
+  // empty — not as "100 % non-compliant" (or, for turbidity, "100 % compliant").
+  const recorded = [
+    d.some(r=>!isNaN(parseFloat(r[HEADERS.ph]))), d.some(r=>!isNaN(parseFloat(r[HEADERS.ec]))),
+    d.some(r=>!isNaN(parseFloat(r[HEADERS.tds]))), d.some(r=>!isNaN(parseFloat(r[HEADERS.temp]))),
+    d.some(r=>(r[HEADERS.turbid]||'').trim()!=='')
+  ];
+  recorded.forEach((ok,i) => { if (!ok) { compliant[i] = 0; nonCompliant[i] = 0; labels[i] += ' — not recorded'; } });
   // Custom plugin: draw value labels inside each stacked bar segment
   const paramLabelPlugin = {
     id: 'paramInlineLabels',
@@ -5771,8 +5967,8 @@ function renderInsights() {
   
   // Cleanest dzongkhag
   const dzWqi = {};
-  d.forEach(r => { const dz=r[HEADERS.dzongkhag]||'Unknown'; dzWqi[dz]=(dzWqi[dz]||[]); dzWqi[dz].push(r._wqi); });
-  const dzAvgWqi = Object.keys(dzWqi).map(k=>({k,v:dzWqi[k].reduce((a,b)=>a+b,0)/dzWqi[k].length})).sort((a,b)=>b.v-a.v);
+  d.forEach(r => { const dz=r[HEADERS.dzongkhag]||'Unknown'; dzWqi[dz]=(dzWqi[dz]||[]); if (r._wqi != null) dzWqi[dz].push(r._wqi); });
+  const dzAvgWqi = Object.keys(dzWqi).filter(k=>dzWqi[k].length).map(k=>({k,v:dzWqi[k].reduce((a,b)=>a+b,0)/dzWqi[k].length})).sort((a,b)=>b.v-a.v);
   
   // Highest dependency
   const dzPop = {};
@@ -7509,7 +7705,8 @@ async function dsApplySelection() {
         if (signErr) throw signErr;
         const res = await fetch(signed.signedUrl);
         const rows = await res.json();
-        DS_CACHE[y] = rows.map(r => ({ ...r, _datasetYear: y }));
+        // Map this year's own column names onto the dashboard's (no-op for already-standard data)
+        DS_CACHE[y] = adaptDatasetRows(rows, { year: y }).map(r => ({ ...r, _datasetYear: y }));
       }
     }
     const merged = years.flatMap(y => DS_CACHE[y] || []);
@@ -7535,10 +7732,10 @@ function renderYearComparison(years) {
   const rows = years.flatMap(y => DS_CACHE[y] || []);
 
   // --- Bar+line: source count by Dzongkhag, per year ---
-  const dzongkhags = [...new Set(rows.map(r => r.Dzongkhag || r.dzongkhag || 'Unspecified'))].sort();
+  const dzongkhags = [...new Set(rows.map(r => r[HEADERS.dzongkhag] || r.Dzongkhag || r.dzongkhag || 'Unspecified'))].sort();
   const barDatasets = years.map((y, i) => {
     const yearRows = (DS_CACHE[y] || []);
-    const counts = dzongkhags.map(dz => yearRows.filter(r => (r.Dzongkhag || r.dzongkhag) === dz).length);
+    const counts = dzongkhags.map(dz => yearRows.filter(r => (r[HEADERS.dzongkhag] || r.Dzongkhag || r.dzongkhag || 'Unspecified') === dz).length);
     const isLine = i === 1;
     return {
       type: isLine ? 'line' : 'bar',
@@ -7558,12 +7755,12 @@ function renderYearComparison(years) {
   });
 
   // --- Nested donut: Water Status, per year (each dataset = one ring) ---
-  const statuses = [...new Set(rows.map(r => r['Water status'] || r.status || 'Unspecified'))].sort();
+  const statuses = [...new Set(rows.map(r => r[HEADERS.status] || r['Water status'] || r.status || 'Unspecified'))].sort();
   const donutDatasets = years.map((y, i) => {
     const yearRows = (DS_CACHE[y] || []);
     return {
       label: y,
-      data: statuses.map(s => yearRows.filter(r => (r['Water status'] || r.status) === s).length),
+      data: statuses.map(s => yearRows.filter(r => (r[HEADERS.status] || r['Water status'] || r.status || 'Unspecified') === s).length),
       backgroundColor: statuses.map((_, si) => YEAR_COLORS[si % YEAR_COLORS.length]),
       borderColor: '#fff', borderWidth: 1
     };
